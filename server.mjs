@@ -2,6 +2,9 @@ import express, { json, urlencoded } from "express"
 import path from "path"
 import jwt from "jsonwebtoken"
 import { fileURLToPath } from "url"
+import { ApolloServer } from '@apollo/server'
+import { startStandaloneServer } from '@apollo/server/standalone'
+import cors from 'cors'
 
 // ------ App Initialization ------
 const app = express();
@@ -25,6 +28,69 @@ const users = [
 // ------ File Initialization
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
+
+// ------ GraphQL Schema ------
+const typeDefs = `
+  type User {
+    id: ID!
+    username: String!
+  }
+
+  type AuthPayload {
+    token: String!
+    user: User!
+  }
+
+  type Query {
+    me: User
+    users: [User!]!
+    hello: String!
+  }
+
+  type Mutation {
+    login(username: String!, password: String!): AuthPayload!
+  }
+`
+
+// ------ GraphQL Resolvers ------
+const resolvers = {
+  Query: {
+    hello: () => 'Hello from GraphQL!',
+    me: (parent, args, context) => {
+      if (!context.user) {
+        throw new Error('Not authenticated')
+      }
+      return users.find(user => user.id === context.user.sub)
+    },
+    users: (parent, args, context) => {
+      if (!context.user) {
+        throw new Error('Not authenticated')
+      }
+      return users.map(user => ({ id: user.id, username: user.username }))
+    }
+  },
+  Mutation: {
+    login: (parent, { username, password }) => {
+      const user = users.find(u => u.username === username)
+      if (!user) {
+        throw new Error('User not found')
+      }
+      
+      if (user.password !== password) {
+        throw new Error('Invalid password')
+      }
+
+      const token = jwt.sign({ sub: user.id, username: user.username }, JWT_SECRET, {
+        expiresIn: "10m"
+      })
+
+      return {
+        token,
+        user: { id: user.id, username: user.username }
+      }
+    }
+  }
+}
 
 // ------ Middleware ------
 // --- global middleware ---
@@ -87,7 +153,40 @@ app.get("/howdy", auth, (req, res) => {
 })
 
 
+// ------ Apollo Server Setup ------
+const apolloServer = new ApolloServer({
+  typeDefs,
+  resolvers,
+})
+
 // ------ Server Generation ------
-app.listen(port, () => {
-  console.log(`🚀 Server running at http://localhost:${port}`);
-});
+async function startServer() {
+  // Start Express server
+  app.listen(port, () => {
+    console.log(`🚀 Express server running at http://localhost:${port}`)
+  })
+
+  // Start Apollo Server on a different port
+  const { url } = await startStandaloneServer(apolloServer, {
+    listen: { port: 4001 },
+    context: async ({ req }) => {
+      const authHeader = req.headers.authorization
+      if (authHeader) {
+        const token = authHeader.split(' ')[1]
+        try {
+          const user = jwt.verify(token, JWT_SECRET)
+          return { user }
+        } catch (err) {
+          return {}
+        }
+      }
+      return {}
+    },
+  })
+
+  console.log(`🚀 GraphQL server ready at ${url}`)
+}
+
+startServer().catch(error => {
+  console.error('Error starting server:', error)
+})
